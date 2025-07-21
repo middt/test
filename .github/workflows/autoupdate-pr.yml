@@ -3,7 +3,7 @@ name: Auto Update PRs with autoupdate Label
 on:
   push:
     branches:
-      - master
+      - main
 
 jobs:
   auto-update-prs:
