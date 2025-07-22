@@ -23,30 +23,92 @@ jobs:
         id: get_prs
         run: |
           # Use GitHub CLI to fetch open PRs with the autoupdate label
-          PRS=$(gh pr list --label "autoupdate" --state open --json number,headRefName --jq '.[].headRefName')
+          PRS=$(gh pr list --label "autoupdate" --state open --json number,headRefName --jq -r '.[].headRefName')
 
           if [ -z "$PRS" ]; then
             echo "No open PRs found with the autoupdate label."
+            echo "prs=" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "prs=$PRS" >> $GITHUB_OUTPUT
+          echo "Found PR branches to update:"
+          echo "$PRS"
+          
+          # Convert newlines to spaces for easier processing
+          PRS_SPACE_SEPARATED=$(echo "$PRS" | tr '\n' ' ')
+          echo "prs=$PRS_SPACE_SEPARATED" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update each PR branch
         if: steps.get_prs.outputs.prs != ''
         run: |
+          echo "Branches to update: ${{ steps.get_prs.outputs.prs }}"
+          
           for branch in ${{ steps.get_prs.outputs.prs }}
           do
+            echo "========================================="
             echo "Updating branch: $branch"
+            echo "========================================="
 
+            # Fetch latest changes
             git fetch origin
-            git checkout $branch || git checkout -b $branch origin/$branch
 
-            # Merge latest master
-            git merge origin/master -m "Auto merge from master"
+            # Checkout the PR branch
+            if git checkout $branch; then
+              echo "✓ Checked out existing branch: $branch"
+            elif git checkout -b $branch origin/$branch; then
+              echo "✓ Created and checked out branch: $branch"
+            else
+              echo "✗ Failed to checkout branch: $branch"
+              continue
+            fi
 
-            # Push updated branch
-            git push origin $branch
+            # Check if branch is behind main
+            BEHIND=$(git rev-list --count HEAD..origin/main)
+            if [ "$BEHIND" -eq 0 ]; then
+              echo "✓ Branch $branch is already up to date with main"
+              continue
+            fi
+
+            echo "Branch is $BEHIND commits behind main. Attempting to merge..."
+
+            # Attempt to merge latest main
+            if git merge origin/main -m "Auto merge from main [skip ci]"; then
+              echo "✓ Successfully merged main into $branch"
+              
+              # Push updated branch
+              if git push origin $branch; then
+                echo "✓ Successfully pushed updated branch: $branch"
+              else
+                echo "✗ Failed to push branch: $branch"
+              fi
+            else
+              echo "✗ Merge conflict detected in branch: $branch"
+              echo "This branch requires manual resolution."
+              
+              # Reset to clean state
+              git merge --abort 2>/dev/null || true
+              git checkout main
+              
+              # Comment on the PR about the conflict
+              PR_NUMBER=$(gh pr list --head $branch --json number --jq '.[0].number')
+              if [ ! -z "$PR_NUMBER" ]; then
+                COMMENT_BODY="⚠️ **Auto-update failed due to merge conflicts**
+
+                This PR could not be automatically updated because merging the latest changes from \`main\` resulted in conflicts.
+
+                Please manually resolve the conflicts by:
+                1. \`git checkout $branch\`
+                2. \`git merge main\`
+                3. Resolve any conflicts
+                4. \`git commit\` and \`git push\`
+
+                The autoupdate will retry on the next push to main."
+                
+                gh pr comment $PR_NUMBER --body "$COMMENT_BODY"
+              fi
+            fi
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
