@@ -29,7 +29,7 @@ app.MapGet("/health", () => Results.Ok(new {
 
 // Hello World endpoint
 app.MapGet("/", () => Results.Ok(new { 
-    message = "Hello from ASP.NET Core 9! - v1.0.0", 
+    message = "Hello from ASP.NET Core 9! - v1.0.2 olmalı", 
     timestamp = DateTime.UtcNow 
 }))
 .WithName("HelloWorld")
