@@ -1,0 +1,248 @@
+name: Docker Release Build
+
+on:
+  push:
+    branches:
+      - 'release-*'
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major_minor: ${{ steps.version.outputs.major_minor }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version from branch
+        id: version
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Branch name: $BRANCH_NAME"
+          
+          # Extract version from branch name (e.g., release-v1.11 -> v1.11, release-v2.5-feature -> v2.5)
+          if [[ $BRANCH_NAME =~ ^release-(v[0-9]+\.[0-9]+)(.*)$ ]]; then
+            BASE_VERSION="${BASH_REMATCH[1]}"
+            echo "Base version: $BASE_VERSION"
+            echo "major_minor=$BASE_VERSION" >> $GITHUB_OUTPUT
+            
+            # Get all existing tags for this major.minor version
+            EXISTING_TAGS=$(git tag -l "${BASE_VERSION}.*" | sort -V)
+            echo "Existing tags for $BASE_VERSION:"
+            echo "$EXISTING_TAGS"
+            
+            if [ -z "$EXISTING_TAGS" ]; then
+              # No existing patch versions, start with .1
+              NEW_VERSION="${BASE_VERSION}.1"
+            else
+              # Get the latest patch version and increment
+              LATEST_TAG=$(echo "$EXISTING_TAGS" | tail -1)
+              echo "Latest existing tag: $LATEST_TAG"
+              
+              # Extract patch number and increment (supports any major.minor version)
+              if [[ $LATEST_TAG =~ ^v[0-9]+\.[0-9]+\.([0-9]+)$ ]]; then
+                PATCH_NUM="${BASH_REMATCH[1]}"
+                NEW_PATCH=$((PATCH_NUM + 1))
+                NEW_VERSION="${BASE_VERSION}.${NEW_PATCH}"
+              else
+                # Fallback if pattern doesn't match
+                NEW_VERSION="${BASE_VERSION}.1"
+              fi
+            fi
+            
+            echo "New version will be: $NEW_VERSION"
+            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Branch does not match expected pattern 'release-vX.Y[suffix]'"
+            echo "Expected format: release-v1.11, release-v2.5, release-v3.0-feature, etc."
+            echo "Actual branch: $BRANCH_NAME"
+            exit 1
+          fi
+
+  build-and-push:
+    needs: determine-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.determine-version.outputs.version }}
+            type=raw,value=${{ needs.determine-version.outputs.major_minor }}-latest
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create Dockerfile if not exists
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "Creating basic Dockerfile..."
+            cat > Dockerfile << 'EOF'
+          FROM node:18-alpine
+          
+          WORKDIR /app
+          
+          # Copy package files
+          COPY package*.json ./
+          
+          # Install dependencies
+          RUN npm ci --only=production
+          
+          # Copy application code
+          COPY . .
+          
+          # Expose port
+          EXPOSE 3000
+          
+          # Health check
+          HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+            CMD curl -f http://localhost:3000/health || exit 1
+          
+          # Start the application
+          CMD ["npm", "start"]
+          EOF
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+  create-release:
+    needs: [determine-version, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "Release Bot"
+          git config --global user.email "release-bot@users.noreply.github.com"
+
+      - name: Create and push tag
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          echo "Creating tag: $VERSION"
+          
+          # Check if tag already exists
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists, skipping tag creation"
+          else
+            git tag -a "$VERSION" -m "Release $VERSION
+
+            Auto-generated release for Docker package.
+            
+            Docker images:
+            - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
+            - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.major_minor }}-latest
+            
+            Built from commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}"
+            
+            git push origin "$VERSION"
+            echo "✓ Created and pushed tag: $VERSION"
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          MAJOR_MINOR="${{ needs.determine-version.outputs.major_minor }}"
+          
+          # Get previous tag for changelog
+          PREV_TAG=$(git tag -l "${MAJOR_MINOR}.*" | sort -V | tail -2 | head -1)
+          
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$VERSION" ]; then
+            echo "## Changes since $PREV_TAG" > changelog.md
+            echo "" >> changelog.md
+            git log --pretty=format:"- %s (%h)" ${PREV_TAG}..HEAD >> changelog.md
+          else
+            echo "## Initial release for $MAJOR_MINOR" > changelog.md
+            echo "" >> changelog.md
+            echo "- Initial Docker package release" >> changelog.md
+          fi
+          
+          echo "" >> changelog.md
+          echo "## Docker Images" >> changelog.md
+          echo "" >> changelog.md
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION\`" >> changelog.md
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$MAJOR_MINOR-latest\`" >> changelog.md
+          echo "" >> changelog.md
+          echo "## Usage" >> changelog.md
+          echo "" >> changelog.md
+          echo "\`\`\`bash" >> changelog.md
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
+          echo "docker run -p 3000:3000 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
+          echo "\`\`\`" >> changelog.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: Release ${{ needs.determine-version.outputs.version }}
+          body_path: changelog.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    needs: [determine-version, build-and-push, create-release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify success
+        if: needs.build-and-push.result == 'success' && needs.create-release.result == 'success'
+        run: |
+          echo "🎉 Successfully built and released Docker package!"
+          echo "Version: ${{ needs.determine-version.outputs.version }}"
+          echo "Docker Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}"
+          echo "Release URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.determine-version.outputs.version }}"
+
+      - name: Notify failure
+        if: needs.build-and-push.result == 'failure' || needs.create-release.result == 'failure'
+        run: |
+          echo "❌ Docker package build or release failed!"
+          echo "Check the workflow logs for details."
+          exit 1 
