@@ -23,7 +23,7 @@ jobs:
         id: get_prs
         run: |
           # Use GitHub CLI to fetch open PRs with the autoupdate label
-          PRS=$(gh pr list --label "autoupdate" --state open --json number,headRefName --jq -r ".[].headRefName")
+          PRS=$(gh pr list --label "autoupdate" --state open --json number,headRefName | jq -r '.[].headRefName')
 
           if [ -z "$PRS" ]; then
             echo "No open PRs found with the autoupdate label."
