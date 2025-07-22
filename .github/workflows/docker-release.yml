@@ -99,36 +99,6 @@ jobs:
             type=raw,value=${{ needs.determine-version.outputs.major_minor }}-latest
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Create Dockerfile if not exists
-        run: |
-          if [ ! -f Dockerfile ]; then
-            echo "Creating basic Dockerfile..."
-            cat > Dockerfile << 'EOF'
-          FROM node:18-alpine
-          
-          WORKDIR /app
-          
-          # Copy package files
-          COPY package*.json ./
-          
-          # Install dependencies
-          RUN npm ci --only=production
-          
-          # Copy application code
-          COPY . .
-          
-          # Expose port
-          EXPOSE 3000
-          
-          # Health check
-          HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-            CMD curl -f http://localhost:3000/health || exit 1
-          
-          # Start the application
-          CMD ["npm", "start"]
-          EOF
-          fi
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -212,7 +182,7 @@ jobs:
           echo "" >> changelog.md
           echo "\`\`\`bash" >> changelog.md
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
-          echo "docker run -p 3000:3000 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
+          echo "docker run -p 8080:8080 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
           echo "\`\`\`" >> changelog.md
 
       - name: Create GitHub Release
