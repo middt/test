@@ -123,3 +123,48 @@ Response includes:
 - Machine information
 - .NET version
 - Uptime statistics
+
+## Branch Protection Setup
+
+This repository includes code review requirements for main and release branches to ensure code quality and security.
+
+### CODEOWNERS Configuration
+
+The `.github/CODEOWNERS` file automatically requests code reviews:
+
+```
+# All files require review from @middt before merging to main or release-* branches
+* @middt
+```
+
+### Setting Up Branch Protection Rules
+
+To protect your main and release branches:
+
+#### Step 1: Go to Repository Settings
+1. Navigate to your repository on GitHub
+2. Click **Settings** → **Branches**
+
+#### Step 2: Protect Main Branch
+1. Click **Add rule** or **Add protection rule**
+2. Configure:
+   - **Branch name pattern**: `main`
+   - ✅ **Require a pull request before merging**
+   - ✅ **Require review from CODEOWNERS**
+   - Click **Create**
+
+#### Step 3: Protect Release Branches
+1. Add another protection rule
+2. Configure:
+   - **Branch name pattern**: `release-*`
+   - ✅ **Require a pull request before merging**
+   - ✅ **Require review from CODEOWNERS**
+   - Click **Create**
+
+### What This Provides
+
+- **No direct pushes** to main or release branches
+- **All changes** must go through Pull Requests
+- **Automatic code review** requests for all PRs
+- **Maintains code quality** and prevents unauthorized changes
+- **Docker workflows** still work automatically after PR approval
