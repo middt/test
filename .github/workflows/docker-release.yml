@@ -75,6 +75,13 @@ jobs:
   build-and-push:
     needs: determine-version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -100,6 +107,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -107,12 +115,31 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # OCI provenance + SBOM in the registry (immutable digest-bound attestations)
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ needs.determine-version.outputs.version }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image by digest (immutable reference)
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          cosign sign --yes "${IMAGE_REF}@${{ steps.push.outputs.digest }}"
+
+      - name: Attest build provenance (GitHub artifact attestation + registry)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   create-release:
     needs: [determine-version, build-and-push]
@@ -141,13 +168,17 @@ jobs:
             git tag -a "$VERSION" -m "Release $VERSION
 
             Auto-generated release for Docker package.
-            
-            Docker images:
+
+            Immutable digest (sign & verify against this):
+            - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image_digest }}
+
+            Tags (mutable):
             - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION
             - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.major_minor }}-latest
-            
+
             Built from commit: ${{ github.sha }}
-            Branch: ${{ github.ref_name }}"
+            Branch: ${{ github.ref_name }}
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             
             git push origin "$VERSION"
             echo "✓ Created and pushed tag: $VERSION"
@@ -175,8 +206,22 @@ jobs:
           echo "" >> changelog.md
           echo "## Docker Images" >> changelog.md
           echo "" >> changelog.md
+          echo "### Immutable digest (preferred for trust)" >> changelog.md
+          echo "" >> changelog.md
+          echo "Tags can move; this digest cannot. Signatures and provenance refer to this reference." >> changelog.md
+          echo "" >> changelog.md
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image_digest }}\`" >> changelog.md
+          echo "" >> changelog.md
+          echo "### Tags (convenience)" >> changelog.md
+          echo "" >> changelog.md
           echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION\`" >> changelog.md
           echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$MAJOR_MINOR-latest\`" >> changelog.md
+          echo "" >> changelog.md
+          echo "## Supply chain" >> changelog.md
+          echo "" >> changelog.md
+          echo "- **OCI provenance & SBOM**: pushed with the image (BuildKit \`provenance: mode=max\`, \`sbom: true\`)." >> changelog.md
+          echo "- **GitHub build provenance**: artifact attestation for this workflow run (identity, repo, workflow ref)." >> changelog.md
+          echo "- **Cosign signature**: image signed by digest with keyless OIDC (see verify below)." >> changelog.md
           echo "" >> changelog.md
           echo "## Usage" >> changelog.md
           echo "" >> changelog.md
@@ -184,6 +229,16 @@ jobs:
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
           echo "docker run -p 8080:8080 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION" >> changelog.md
           echo "\`\`\`" >> changelog.md
+          echo "" >> changelog.md
+          echo "### Verify Cosign signature (digest)" >> changelog.md
+          echo "" >> changelog.md
+          echo "\`\`\`bash" >> changelog.md
+          echo "cosign verify \\" >> changelog.md
+          echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\" >> changelog.md
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image_digest }}" >> changelog.md
+          echo "\`\`\`" >> changelog.md
+          echo "" >> changelog.md
+          echo "Tighten \`--certificate-identity-regexp\` to your workflow path if you pin policy to this repository." >> changelog.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -207,7 +262,8 @@ jobs:
         run: |
           echo "🎉 Successfully built and released Docker package!"
           echo "Version: ${{ needs.determine-version.outputs.version }}"
-          echo "Docker Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}"
+          echo "Image (digest): ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image_digest }}"
+          echo "Image (tag): ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}"
           echo "Release URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.determine-version.outputs.version }}"
 
       - name: Notify failure
